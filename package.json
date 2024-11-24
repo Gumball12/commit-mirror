@@ -1,5 +1,8 @@
 {
-  "name": "version-tracker",
+  "scripts": {
+    "test": "bun test --coverage"
+  },
+  "name": "commit-mirror",
   "module": "index.ts",
   "type": "module",
   "devDependencies": {

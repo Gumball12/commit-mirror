@@ -1,74 +1,177 @@
 import { Octokit } from '@octokit/rest';
 
-type Release = {
-  id: number;
-  tag_name: string;
-  name: string | null;
-  draft: boolean;
-  prerelease: boolean;
-  created_at: string;
-  published_at: string;
-  url: string;
+type Repo = {
+  owner: string;
+  repo: string;
 };
 
-const TARGET_TAG_NAME = 'v1.2.0';
+type Issue = {
+  number: number;
+  title: string;
+  body: string;
+  labels: { name: string }[];
+};
 
-// 1. 번역 원본 커밋 hash 가져옴 & `git show <hash> | patch-id`
-// 1.1. 해당 hash로 pre-release 아니고, v로 시작하는 릴리즈에 포함되었는지 가져올 수 있나? (main에서 배포 시 처리를 위함)
-// 2. 버전 높은 이름 갖는 branch부터 차례대로 `git rev-list <hash>_<branch> | xargs git show | git patch-id`
-// 3. 나오는 값 중 1 결과와 동일하다? 그럼 `git tag --contains <3_hash>`로 tags 가져오고
-// 4. 나오는 tags 중 pre-release 아니고 `v` 시작하는 버전 중 가장 높은 버전 선택
-const getReleases = async (owner: string, repo: string): Promise<Release[]> => {
+const DEFAULT_ISSUES_PER_PAGE = 100;
+
+type ProcessIssuesOptions = Repo & {
+  isIgnored: (issue: Issue) => boolean;
+  action: (issue: Issue) => Promise<void> | void;
+  perPage?: number;
+};
+
+export const processIssues = async ({
+  owner,
+  repo,
+  isIgnored,
+  action,
+  perPage = DEFAULT_ISSUES_PER_PAGE,
+}: ProcessIssuesOptions): Promise<void> => {
   const octokit = new Octokit();
 
+  const { data: issues } = await octokit.rest.issues.listForRepo({
+    owner,
+    repo,
+    state: 'open',
+    per_page: perPage,
+  });
+
+  for (const issue of issues) {
+    const issueData: Issue = {
+      title: issue.title,
+      body: issue.body || '',
+      labels: issue.labels as { name: string }[],
+      number: issue.number,
+    };
+
+    if (isIgnored(issueData)) {
+      continue;
+    }
+
+    await action(issueData);
+  }
+};
+
+type FindCommitHashFromIssueBodyOptions = Repo & {
+  issueBody: string;
+};
+
+export const findCommitHashFromIssueBody = ({
+  issueBody,
+  owner,
+  repo,
+}: FindCommitHashFromIssueBodyOptions): string => {
+  const regex = new RegExp(
+    `https://github.com/${owner}/${repo}/commit/([a-zA-Z0-9]+)`,
+  );
+
+  const match = issueBody.match(regex);
+  const commitHash = match?.[1];
+
+  if (!commitHash) {
+    throw new Error('Commit hash not found');
+  }
+
+  return commitHash;
+};
+
+type FindTranslationBranchOptions = Repo & {
+  isTranslationBranch: (branchName: string) => boolean;
+};
+
+export const findTranslationBranch = async ({
+  owner,
+  repo,
+  isTranslationBranch,
+}: FindTranslationBranchOptions): Promise<string> => {
+  const octokit = new Octokit();
   const { data: branches } = await octokit.rest.repos.listBranches({
     owner,
     repo,
-    per_page: 100,
   });
-  console.log(
-    branches
-      .filter(({ name }) => name.startsWith('v'))
-      .filter(({ name }) => !name.includes('/'))
-      .filter(({ name }) => !name.includes('.'))
-      .map(({ name }) => name),
-  );
 
-  const releases = (
-    await octokit.rest.repos.listReleases({
-      owner,
-      repo,
-    })
-  ).data.reverse();
+  const translationBranch = branches.find(branch =>
+    isTranslationBranch(branch.name),
+  )?.name;
 
-  console.log(
-    releases
-      .filter(({ prerelease }) => !prerelease)
-      .filter(({ tag_name: tagName }) => tagName.startsWith('v'))
-      .map(({ tag_name: tagName }) => tagName),
-  );
-
-  /*
-  const currentReleaseIndex = releases.findIndex(
-    release => release.tag_name === TARGET_TAG_NAME,
-  );
-
-  if (currentReleaseIndex < 0) {
-    console.error('invalid tag name');
-    return;
+  if (!translationBranch) {
+    throw new Error('Translation branch not found');
   }
 
-  const prevRelease = releases[currentReleaseIndex - 1];
-
-  const { data: commits } = await octokit.rest.repos.compareCommits({
-    owner,
-    repo,
-    base: prevRelease.tag_name,
-    head: TARGET_TAG_NAME,
-  });
-
-  console.log(commits.commits.map(({ commit }) => commit.message));
-  */
+  return translationBranch;
 };
 
-getReleases('vitejs', 'vite');
+type FindTranslationCommitHashOptions = Repo & {
+  translationBranchName: string;
+  originalCommitHash: string;
+  defaultBranchName?: string;
+};
+
+export const findTranslationCommitHash = async ({
+  translationBranchName,
+  originalCommitHash,
+  owner,
+  repo,
+  defaultBranchName = 'main',
+}: FindTranslationCommitHashOptions): Promise<string | undefined> => {
+  if (translationBranchName === defaultBranchName) {
+    return originalCommitHash;
+  }
+
+  const octokit = new Octokit();
+
+  const { data: originCommit } = await octokit.rest.git.getCommit({
+    owner,
+    repo,
+    commit_sha: originalCommitHash,
+  });
+
+  if (!originCommit) {
+    throw new Error('Origin commit not found');
+  }
+
+  const { data: translationCommits } = await octokit.rest.repos.listCommits({
+    owner,
+    repo,
+    sha: translationBranchName,
+  });
+
+  const translateCommit = translationCommits.find(
+    ({ commit: { message: translateCommitMessage } }) =>
+      translateCommitMessage.startsWith(originCommit.message),
+  );
+
+  return translateCommit?.sha;
+};
+
+type MarkIssueAsTranslatedOptions = Repo & {
+  issueNumber: number;
+  translationCommitHash: string;
+  labelName: string;
+  token: string;
+};
+
+export const markIssueAsTranslated = async ({
+  owner,
+  repo,
+  issueNumber,
+  translationCommitHash,
+  labelName,
+  token,
+}: MarkIssueAsTranslatedOptions): Promise<void> => {
+  const octokit = new Octokit({ auth: token });
+
+  await octokit.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: issueNumber,
+    body: `Translation commit hash: ${translationCommitHash}`,
+  });
+
+  await octokit.rest.issues.removeLabel({
+    owner,
+    repo,
+    issue_number: issueNumber,
+    name: labelName,
+  });
+};
