@@ -1,0 +1,2 @@
+name: 'Commit Mirror'
+description: '어떤 한 브랜치에 존재하는 커밋을 다른 브랜치에도 존재하는지 확인하는 액션'

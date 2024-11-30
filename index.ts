@@ -175,3 +175,24 @@ export const markIssueAsTranslated = async ({
     name: labelName,
   });
 };
+
+/*
+type RunOptions = Repo & {
+  isIgnoredIssue: (issue: Issue) => boolean;
+  action: (issue: Issue) => Promise<void> | void;
+};
+
+export const run = async ({
+  owner,
+  repo,
+  isIgnoredIssue,
+  action,
+}: RunOptions) => {
+  await processIssues({
+    owner,
+    repo,
+    isIgnored: isIgnoredIssue,
+    action,
+  });
+};
+*/
